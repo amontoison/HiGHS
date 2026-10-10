@@ -1701,49 +1701,57 @@ double PDLPSolver::powerMethodGpu() {
   GPU_CHECK(gpuMalloc(&d_buffer_at, buffer_size_at));
   GPU_CHECK(gpuMalloc(&d_buffer_a, buffer_size_a));
 
+  // The scalars stay on the device and are only copied to the host every
+  // check_interval iterations
+  const int check_interval = 10;
+  double* d_scalars = nullptr;
+  GPU_CHECK(gpuMalloc(&d_scalars, 3 * sizeof(double)));
+  double* d_eigenvector_norm = d_scalars;
+  double* d_sigma_sq = d_scalars + 1;
+  double* d_residual_norm = d_scalars + 2;
+  GPU_BLAS_CHECK(
+      gpuBlasSetPointerMode(cublas_handle_, GPU_BLAS_POINTER_MODE_DEVICE));
+
   double sigma_max_sq = 1.0;
 
   for (int iter = 0; iter < max_iter; ++iter) {
-    GPU_CHECK(gpuMemcpy(d_next_eigenvector, d_eigenvector,
-                        a_num_rows_ * sizeof(double), gpuMemcpyDeviceToDevice));
-
-    double eigenvector_norm = 0.0;
-    GPU_BLAS_CHECK(gpuBlasDnrm2(cublas_handle_, a_num_rows_, d_next_eigenvector,
-                                1, &eigenvector_norm));
-    if (!(eigenvector_norm > 0.0) || !std::isfinite(eigenvector_norm)) break;
-
-    double inv_eigenvector_norm = 1.0 / eigenvector_norm;
-    GPU_BLAS_CHECK(gpuBlasDscal(cublas_handle_, a_num_rows_,
-                                &inv_eigenvector_norm, d_next_eigenvector, 1));
-
-    GPU_SPARSE_CHECK(gpuSparseSetDnVecValues(vecNextEigen, d_next_eigenvector));
-    GPU_SPARSE_CHECK(gpuSparseSetDnVecValues(vecDual, d_dual_product));
+    GPU_BLAS_CHECK(gpuBlasDnrm2(cublas_handle_, a_num_rows_, d_eigenvector, 1,
+                                d_eigenvector_norm));
+    launchKernelScaleByInverse_wrapper(d_next_eigenvector, d_eigenvector,
+                                       d_eigenvector_norm, a_num_rows_,
+                                       gpu_stream_);
 
     GPU_SPARSE_CHECK(gpuSparseSpMV(cusparse_handle_,
                                    GPU_OPERATION_NON_TRANSPOSE, &one,
                                    mat_a_T_csr_, vecNextEigen, &zero, vecDual,
                                    GPU_R_64F, GPU_SPMV_CSR_ALG2, d_buffer_at));
-
-    GPU_SPARSE_CHECK(gpuSparseSetDnVecValues(vecEigen, d_eigenvector));
     GPU_SPARSE_CHECK(gpuSparseSpMV(
         cusparse_handle_, GPU_OPERATION_NON_TRANSPOSE, &one, mat_a_csr_,
         vecDual, &zero, vecEigen, GPU_R_64F, GPU_SPMV_CSR_ALG2, d_buffer_a));
 
     GPU_BLAS_CHECK(gpuBlasDdot(cublas_handle_, a_num_rows_, d_next_eigenvector,
-                               1, d_eigenvector, 1, &sigma_max_sq));
+                               1, d_eigenvector, 1, d_sigma_sq));
 
-    double neg_sigma_sq = -sigma_max_sq;
-    GPU_BLAS_CHECK(gpuBlasDscal(cublas_handle_, a_num_rows_, &neg_sigma_sq,
-                                d_next_eigenvector, 1));
-    GPU_BLAS_CHECK(gpuBlasDaxpy(cublas_handle_, a_num_rows_, &one,
-                                d_eigenvector, 1, d_next_eigenvector, 1));
+    launchKernelPowerResidual_wrapper(d_next_eigenvector, d_eigenvector,
+                                      d_sigma_sq, a_num_rows_, gpu_stream_);
+    GPU_BLAS_CHECK(gpuBlasDnrm2(cublas_handle_, a_num_rows_,
+                                d_next_eigenvector, 1, d_residual_norm));
 
-    double residual_norm = 0.0;
-    GPU_BLAS_CHECK(gpuBlasDnrm2(cublas_handle_, a_num_rows_, d_next_eigenvector,
-                                1, &residual_norm));
-    if (residual_norm < tolerance) break;
+    if ((iter + 1) % check_interval != 0 && iter + 1 < max_iter) continue;
+
+    double h_scalars[3];
+    GPU_CHECK(gpuMemcpyAsync(h_scalars, d_scalars, 3 * sizeof(double),
+                             gpuMemcpyDeviceToHost, gpu_stream_));
+    GPU_CHECK(gpuStreamSynchronize(gpu_stream_));
+    const double eigenvector_norm = h_scalars[0];
+    if (!(eigenvector_norm > 0.0) || !std::isfinite(eigenvector_norm)) break;
+    sigma_max_sq = h_scalars[1];
+    if (h_scalars[2] < tolerance) break;
   }
 
+  GPU_BLAS_CHECK(
+      gpuBlasSetPointerMode(cublas_handle_, GPU_BLAS_POINTER_MODE_HOST));
+  GPU_CHECK(gpuFree(d_scalars));
   GPU_CHECK(gpuFree(d_buffer_at));
   GPU_CHECK(gpuFree(d_buffer_a));
   GPU_SPARSE_CHECK(gpuSparseDestroyDnVec(vecEigen));

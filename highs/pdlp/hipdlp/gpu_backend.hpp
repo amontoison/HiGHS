@@ -48,6 +48,9 @@ using gpuSparseStatus_t = hipsparseStatus_t;
 #define gpuBlasDaxpy(h, n, a, x, ix, y, iy) hipblasDaxpy(h, n, a, x, ix, y, iy)
 #define gpuBlasDscal(h, n, a, x, ix) hipblasDscal(h, n, a, x, ix)
 #define GPU_BLAS_STATUS_SUCCESS HIPBLAS_STATUS_SUCCESS
+#define gpuBlasSetPointerMode(h, m) hipblasSetPointerMode(h, m)
+#define GPU_BLAS_POINTER_MODE_HOST HIPBLAS_POINTER_MODE_HOST
+#define GPU_BLAS_POINTER_MODE_DEVICE HIPBLAS_POINTER_MODE_DEVICE
 
 #define gpuSparseCreate(h) hipsparseCreate(h)
 #define gpuSparseDestroy(h) hipsparseDestroy(h)
@@ -137,6 +140,9 @@ using gpuSparseStatus_t = cusparseStatus_t;
 #define gpuBlasDaxpy(h, n, a, x, ix, y, iy) cublasDaxpy(h, n, a, x, ix, y, iy)
 #define gpuBlasDscal(h, n, a, x, ix) cublasDscal(h, n, a, x, ix)
 #define GPU_BLAS_STATUS_SUCCESS CUBLAS_STATUS_SUCCESS
+#define gpuBlasSetPointerMode(h, m) cublasSetPointerMode(h, m)
+#define GPU_BLAS_POINTER_MODE_HOST CUBLAS_POINTER_MODE_HOST
+#define GPU_BLAS_POINTER_MODE_DEVICE CUBLAS_POINTER_MODE_DEVICE
 
 #define gpuSparseCreate(h) cusparseCreate(h)
 #define gpuSparseDestroy(h) cusparseDestroy(h)

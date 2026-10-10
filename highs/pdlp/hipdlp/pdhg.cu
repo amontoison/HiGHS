@@ -253,6 +253,22 @@ __global__ void kernelCheckDual(
   }
 }
 
+// x_out = x_in / *d_norm
+__global__ void kernelScaleByInverse(double* __restrict__ x_out,
+                                     const double* __restrict__ x_in,
+                                     const double* __restrict__ d_norm, int n) {
+  const double inv_norm = 1.0 / (*d_norm);
+  GPU_GRID_STRIDE_LOOP(i, n) { x_out[i] = x_in[i] * inv_norm; }
+}
+
+// x = y - (*d_alpha) * x
+__global__ void kernelPowerResidual(double* __restrict__ x,
+                                    const double* __restrict__ y,
+                                    const double* __restrict__ d_alpha, int n) {
+  const double alpha = *d_alpha;
+  GPU_GRID_STRIDE_LOOP(i, n) { x[i] = fma_rn(-alpha, x[i], y[i]); }
+}
+
 // ============================================================================
 // HALPERN-MODE
 // ============================================================================
@@ -552,4 +568,25 @@ void launchKernelHalpernDualMajor_wrapper(
     gpuGetLastError();
 }
 
+void launchKernelScaleByInverse_wrapper(double* d_x_out, const double* d_x_in,
+                                        const double* d_norm, int n,
+                                        gpuStream_t stream)
+{
+    const int block_size = 256;
+    dim3 config = GetLaunchConfig(n, block_size);
+    kernelScaleByInverse<<<config.x, block_size, 0, stream>>>(
+        d_x_out, d_x_in, d_norm, n);
+    gpuGetLastError();
+}
+
+void launchKernelPowerResidual_wrapper(double* d_x, const double* d_y,
+                                       const double* d_alpha, int n,
+                                       gpuStream_t stream)
+{
+    const int block_size = 256;
+    dim3 config = GetLaunchConfig(n, block_size);
+    kernelPowerResidual<<<config.x, block_size, 0, stream>>>(
+        d_x, d_y, d_alpha, n);
+    gpuGetLastError();
+}
 } // extern "C"

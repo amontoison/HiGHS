@@ -67,6 +67,14 @@ void launchKernelHalpernDualMajor_wrapper(
     const double* d_anchor, const int* d_halpern_iteration, int k_offset,
     double reflection_coeff, gpuStream_t stream);
 
+void launchKernelScaleByInverse_wrapper(double* d_x_out, const double* d_x_in,
+                                        const double* d_norm, int n,
+                                        gpuStream_t stream);
+
+void launchKernelPowerResidual_wrapper(double* d_x, const double* d_y,
+                                       const double* d_alpha, int n,
+                                       gpuStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif
