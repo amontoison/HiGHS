@@ -777,11 +777,13 @@ bool PDLPSolver::runConvergenceCheck(size_t iter, std::vector<double>& output_x,
                                      std::vector<double>& output_y,
                                      TerminationStatus& status) {
   // 1. Compute Average Iterate (GPU or CPU)
+  if (!params_.use_halpern_restart) {
 #if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
-  computeAverageIterateGpu();
+    computeAverageIterateGpu();
 #else
-  computeAverageIterate(Ax_avg_, ATy_avg_);
+    computeAverageIterate(Ax_avg_, ATy_avg_);
 #endif
+  }
 
   SolverResults current_results;
   SolverResults average_results;
@@ -804,9 +806,10 @@ bool PDLPSolver::runConvergenceCheck(size_t iter, std::vector<double>& output_x,
         checkConvergenceGpu(iter, d_x_current_, d_y_current_, d_ax_current_,
                             d_aty_current_, params_.tolerance, current_results,
                             "[L-GPU]", d_dSlackPos_, d_dSlackNeg_, false);
-    average_converged = checkConvergenceGpu(
-        iter, d_x_avg_, d_y_avg_, d_ax_avg_, d_aty_avg_, params_.tolerance,
-        average_results, "[A-GPU]", d_dSlackPosAvg_, d_dSlackNegAvg_, false);
+    if (!params_.use_halpern_restart)
+      average_converged = checkConvergenceGpu(
+          iter, d_x_avg_, d_y_avg_, d_ax_avg_, d_aty_avg_, params_.tolerance,
+          average_results, "[A-GPU]", d_dSlackPosAvg_, d_dSlackNegAvg_, false);
   }
 
 #else
