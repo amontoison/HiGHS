@@ -17,12 +17,6 @@ typedef unsigned int HighsUInt;
 // Define Infinity for GPU
 #define GPU_INF 1e20
 
-// Buffer Indices for the reduction array
-#define IDX_PRIMAL_FEAS 0
-#define IDX_DUAL_FEAS   1
-#define IDX_PRIMAL_OBJ  2
-#define IDX_DUAL_OBJ    3
-
 // warpSize is a built-in device variable that returns the actual hardware
 // warp/wavefront width (32 on CUDA and RDNA, 64 on GCN/CDNA).
 __device__ __forceinline__ double gpuReduce(double val) {
@@ -251,6 +245,46 @@ __global__ void kernelCheckDual(
     atomicAdd(&d_results[IDX_PRIMAL_OBJ], s_dual[1]);
     atomicAdd(&d_results[IDX_DUAL_OBJ],   s_dual[2]);
   }
+}
+
+// Must be called by all the threads of the block
+__device__ void blockSumAtomicAdd(double val, double* d_sum) {
+  __shared__ double s_sum;
+  val = gpuReduce(val);
+  if (threadIdx.x == 0) s_sum = 0.0;
+  __syncthreads();
+  if ((threadIdx.x & (warpSize - 1)) == 0) atomicAdd(&s_sum, val);
+  __syncthreads();
+  if (threadIdx.x == 0) atomicAdd(d_sum, s_sum);
+}
+
+__global__ void kernelFixedPointErrorDual(
+    double* __restrict__ delta_y, const double* __restrict__ pdhg_dual,
+    const double* __restrict__ reflected_dual, double* __restrict__ d_results,
+    int n_rows) {
+  double local_dual_sq = 0.0;
+  GPU_GRID_STRIDE_LOOP(i, n_rows) {
+    const double delta = pdhg_dual[i] - reflected_dual[i];
+    delta_y[i] = delta;
+    local_dual_sq = fma_rn(delta, delta, local_dual_sq);
+  }
+  blockSumAtomicAdd(local_dual_sq, &d_results[IDX_FPE_DUAL_SQ]);
+}
+
+__global__ void kernelFixedPointErrorPrimal(
+    const double* __restrict__ pdhg_primal,
+    const double* __restrict__ reflected_primal,
+    const double* __restrict__ at_delta_y, double* __restrict__ d_results,
+    int n_cols) {
+  double local_primal_sq = 0.0;
+  double local_cross = 0.0;
+  GPU_GRID_STRIDE_LOOP(i, n_cols) {
+    const double delta = pdhg_primal[i] - reflected_primal[i];
+    local_primal_sq = fma_rn(delta, delta, local_primal_sq);
+    local_cross = fma_rn(delta, at_delta_y[i], local_cross);
+  }
+  blockSumAtomicAdd(local_primal_sq, &d_results[IDX_FPE_PRIMAL_SQ]);
+  blockSumAtomicAdd(local_cross, &d_results[IDX_FPE_CROSS]);
 }
 
 // x_out = x_in / *d_norm
@@ -565,6 +599,31 @@ void launchKernelHalpernDualMajor_wrapper(
         d_current_dual, d_pdhg_dual, d_reflected_dual,
         d_primal_product, d_rhs, d_is_equality, d_step_size, n,
         d_anchor, d_halpern_iteration, k_offset, reflection_coeff);
+    gpuGetLastError();
+}
+
+void launchKernelFixedPointErrorDual_wrapper(double* d_delta_y,
+                                             const double* d_pdhg_dual,
+                                             const double* d_reflected_dual,
+                                             double* d_results, int n_rows,
+                                             gpuStream_t stream)
+{
+    const int block_size = 256;
+    dim3 config = GetLaunchConfig(n_rows, block_size);
+    kernelFixedPointErrorDual<<<config.x, block_size, 0, stream>>>(
+        d_delta_y, d_pdhg_dual, d_reflected_dual, d_results, n_rows);
+    gpuGetLastError();
+}
+
+void launchKernelFixedPointErrorPrimal_wrapper(
+    const double* d_pdhg_primal, const double* d_reflected_primal,
+    const double* d_at_delta_y, double* d_results, int n_cols,
+    gpuStream_t stream)
+{
+    const int block_size = 256;
+    dim3 config = GetLaunchConfig(n_cols, block_size);
+    kernelFixedPointErrorPrimal<<<config.x, block_size, 0, stream>>>(
+        d_pdhg_primal, d_reflected_primal, d_at_delta_y, d_results, n_cols);
     gpuGetLastError();
 }
 

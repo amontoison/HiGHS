@@ -627,7 +627,7 @@ void PDLPSolver::solve(std::vector<double>& x, std::vector<double>& y) {
 
     // Compute Error for Restart Check
 #if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
-    fpe_ = computeFixedPointErrorGpu();
+    launchFixedPointErrorGpu();
 #else
     fpe_ = computeFixedPointError();
 #endif
@@ -644,6 +644,9 @@ void PDLPSolver::solve(std::vector<double>& x, std::vector<double>& y) {
       termination_status = check_status;
       break;
     }
+#if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
+    fpe_ = fixedPointErrorFromSums(&gpu_results_[IDX_FPE_PRIMAL_SQ]);
+#endif
 
     // =======================================================================
     // RESTART CHECK
@@ -658,18 +661,18 @@ void PDLPSolver::solve(std::vector<double>& x, std::vector<double>& y) {
         updatePrimalWeightAtRestart(results_);
       }
 #if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
-      GPU_CHECK(gpuMemcpy(d_x_anchor_, d_pdhg_primal_,
-                          lp_.num_col_ * sizeof(double),
-                          gpuMemcpyDeviceToDevice));
-      GPU_CHECK(gpuMemcpy(d_y_anchor_, d_pdhg_dual_,
-                          lp_.num_row_ * sizeof(double),
-                          gpuMemcpyDeviceToDevice));
-      GPU_CHECK(gpuMemcpy(d_x_current_, d_pdhg_primal_,
-                          lp_.num_col_ * sizeof(double),
-                          gpuMemcpyDeviceToDevice));
-      GPU_CHECK(gpuMemcpy(d_y_current_, d_pdhg_dual_,
-                          lp_.num_row_ * sizeof(double),
-                          gpuMemcpyDeviceToDevice));
+      GPU_CHECK(gpuMemcpyAsync(d_x_anchor_, d_pdhg_primal_,
+                               lp_.num_col_ * sizeof(double),
+                               gpuMemcpyDeviceToDevice, gpu_stream_));
+      GPU_CHECK(gpuMemcpyAsync(d_y_anchor_, d_pdhg_dual_,
+                               lp_.num_row_ * sizeof(double),
+                               gpuMemcpyDeviceToDevice, gpu_stream_));
+      GPU_CHECK(gpuMemcpyAsync(d_x_current_, d_pdhg_primal_,
+                               lp_.num_col_ * sizeof(double),
+                               gpuMemcpyDeviceToDevice, gpu_stream_));
+      GPU_CHECK(gpuMemcpyAsync(d_y_current_, d_pdhg_dual_,
+                               lp_.num_row_ * sizeof(double),
+                               gpuMemcpyDeviceToDevice, gpu_stream_));
 #else
       x_anchor_ = x_next_;
       y_anchor_ = y_next_;
@@ -732,44 +735,38 @@ double PDLPSolver::computeFixedPointError() {
 }
 
 #if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
-double PDLPSolver::computeFixedPointErrorGpu() {
-  double alpha_minus_one = -1.0;
-
-  // 1. delta_x = x_next_ - reflected_x_
-  // (Assuming d_pdhg_primal_ maps to x_next_ and d_x_next_ is used as
-  // reflected_x_ in your minor/major steps)
-  GPU_CHECK(gpuMemcpy(d_delta_x_, d_pdhg_primal_, a_num_cols_ * sizeof(double),
-                      gpuMemcpyDeviceToDevice));
-  GPU_BLAS_CHECK(gpuBlasDaxpy(cublas_handle_, a_num_cols_, &alpha_minus_one,
-                              d_x_next_, 1, d_delta_x_, 1));
-
-  // 2. delta_y = y_next_ - reflected_y_
-  GPU_CHECK(gpuMemcpy(d_delta_y_, d_pdhg_dual_, a_num_rows_ * sizeof(double),
-                      gpuMemcpyDeviceToDevice));
-  GPU_BLAS_CHECK(gpuBlasDaxpy(cublas_handle_, a_num_rows_, &alpha_minus_one,
-                              d_y_next_, 1, d_delta_y_, 1));
-
-  // 3. AT_delta_y = A^T * delta_y
+void PDLPSolver::launchFixedPointErrorGpu() {
+  GPU_CHECK(gpuMemsetAsync(d_convergence_results_ + IDX_FPE_PRIMAL_SQ, 0,
+                           3 * sizeof(double), gpu_stream_));
+  launchKernelFixedPointErrorDual_wrapper(
+      d_delta_y_, d_pdhg_dual_, d_y_next_ /*reflected*/,
+      d_convergence_results_, a_num_rows_, gpu_stream_);
   linalgGpuATy(d_delta_y_, d_AT_delta_y_);
+  launchKernelFixedPointErrorPrimal_wrapper(
+      d_pdhg_primal_, d_x_next_ /*reflected*/, d_AT_delta_y_,
+      d_convergence_results_, a_num_cols_, gpu_stream_);
+}
 
-  // 4. Compute norms and cross term
-  double primal_norm = 0.0, dual_norm = 0.0, cross_term = 0.0;
-
-  GPU_BLAS_CHECK(
-      gpuBlasDnrm2(cublas_handle_, a_num_cols_, d_delta_x_, 1, &primal_norm));
-  GPU_BLAS_CHECK(
-      gpuBlasDnrm2(cublas_handle_, a_num_rows_, d_delta_y_, 1, &dual_norm));
-  GPU_BLAS_CHECK(gpuBlasDdot(cublas_handle_, a_num_cols_, d_delta_x_, 1,
-                             d_AT_delta_y_, 1, &cross_term));
-
-  double primal_norm_sq = primal_norm * primal_norm;
-  double dual_norm_sq = dual_norm * dual_norm;
+double PDLPSolver::fixedPointErrorFromSums(const double* fpe_sums) const {
+  const double primal_norm_sq = fpe_sums[0];
+  const double dual_norm_sq = fpe_sums[1];
+  const double cross_term = fpe_sums[2];
 
   double movement =
       primal_norm_sq * params_.omega + dual_norm_sq / params_.omega;
   double interaction = 2.0 * params_.eta * cross_term;
 
   return std::sqrt(std::max(0.0, movement + interaction));
+}
+
+double PDLPSolver::computeFixedPointErrorGpu() {
+  launchFixedPointErrorGpu();
+  double fpe_sums[3];
+  GPU_CHECK(gpuMemcpyAsync(fpe_sums, d_convergence_results_ + IDX_FPE_PRIMAL_SQ,
+                           3 * sizeof(double), gpuMemcpyDeviceToHost,
+                           gpu_stream_));
+  GPU_CHECK(gpuStreamSynchronize(gpu_stream_));
+  return fixedPointErrorFromSums(fpe_sums);
 }
 #endif
 
@@ -2468,7 +2465,6 @@ void PDLPSolver::setupGpu() {
     GPU_CHECK(gpuMemset(d_pdhg_primal_, 0, a_num_cols_ * sizeof(double)));
     GPU_CHECK(gpuMemset(d_pdhg_dual_, 0, a_num_rows_ * sizeof(double)));
   }
-  GPU_CHECK(gpuMalloc(&d_delta_x_, a_num_cols_ * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_delta_y_, a_num_rows_ * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_AT_delta_y_, a_num_cols_ * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_ax_current_, a_num_rows_ * sizeof(double)));
@@ -2479,7 +2475,10 @@ void PDLPSolver::setupGpu() {
   GPU_CHECK(gpuMalloc(&d_aty_avg_, a_num_cols_ * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_x_sum_, a_num_cols_ * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_y_sum_, a_num_rows_ * sizeof(double)));
-  GPU_CHECK(gpuMalloc(&d_convergence_results_, 4 * sizeof(double)));
+  GPU_CHECK(
+      gpuMalloc(&d_convergence_results_, NUM_GPU_RESULTS * sizeof(double)));
+  GPU_CHECK(gpuMemset(d_convergence_results_, 0,
+                      NUM_GPU_RESULTS * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_dSlackPos_, a_num_cols_ * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_dSlackNeg_, a_num_cols_ * sizeof(double)));
   GPU_CHECK(gpuMalloc(&d_dSlackPosAvg_, a_num_cols_ * sizeof(double)));
@@ -2605,7 +2604,6 @@ void PDLPSolver::cleanupGpu() {
   if (d_y_anchor_) GPU_CHECK(gpuFree(d_y_anchor_));
   if (d_pdhg_primal_) GPU_CHECK(gpuFree(d_pdhg_primal_));
   if (d_pdhg_dual_) GPU_CHECK(gpuFree(d_pdhg_dual_));
-  GPU_CHECK(gpuFree(d_delta_x_));
   GPU_CHECK(gpuFree(d_delta_y_));
   GPU_CHECK(gpuFree(d_AT_delta_y_));
   GPU_CHECK(gpuFree(d_x_temp_diff_norm_result_));
@@ -2708,16 +2706,15 @@ bool PDLPSolver::checkConvergenceGpu(const HighsInt iter, const double* d_x,
       d_is_equality_row_, d_col_scale_, d_row_scale_, lp_.num_col_,
       lp_.num_row_, use_halpern_slack, gpu_stream_);
 
-  // copy 4 doubles back to CPU
+  GPU_CHECK(gpuMemcpyAsync(gpu_results_, d_convergence_results_,
+                           NUM_GPU_RESULTS * sizeof(double),
+                           gpuMemcpyDeviceToHost, gpu_stream_));
+  GPU_CHECK(gpuStreamSynchronize(gpu_stream_));
 
-  double h_results[4];
-  GPU_CHECK(gpuMemcpy(h_results, d_convergence_results_, 4 * sizeof(double),
-                      gpuMemcpyDeviceToHost));
-
-  double primal_feas_sq = h_results[0];
-  double dual_feas_sq = h_results[1];
-  double primal_obj = h_results[2] + lp_.offset_;
-  double dual_obj = h_results[3] + lp_.offset_;
+  double primal_feas_sq = gpu_results_[IDX_PRIMAL_FEAS];
+  double dual_feas_sq = gpu_results_[IDX_DUAL_FEAS];
+  double primal_obj = gpu_results_[IDX_PRIMAL_OBJ] + lp_.offset_;
+  double dual_obj = gpu_results_[IDX_DUAL_OBJ] + lp_.offset_;
 
   results.primal_feasibility = std::sqrt(primal_feas_sq);
   results.dual_feasibility = std::sqrt(dual_feas_sq);

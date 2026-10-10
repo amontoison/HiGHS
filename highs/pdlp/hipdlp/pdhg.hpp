@@ -14,6 +14,7 @@
 #include "HConfig.h"
 #if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
 #include "gpu_backend.hpp"
+#include "pdhg_kernels.hpp"
 #endif
 
 #define PDLP_PROFILE (0)
@@ -273,7 +274,6 @@ class PDLPSolver {
   double *d_x_at_last_restart_ = nullptr, *d_y_at_last_restart_ = nullptr;
   double *d_x_anchor_ = nullptr, *d_y_anchor_ = nullptr;
   double *d_pdhg_primal_ = nullptr, *d_pdhg_dual_ = nullptr;
-  double* d_delta_x_ = nullptr;
   double* d_delta_y_ = nullptr;
   double* d_AT_delta_y_ = nullptr;
 
@@ -285,6 +285,7 @@ class PDLPSolver {
 
   // Scratch / Output buffers
   double* d_convergence_results_ = nullptr;
+  double gpu_results_[NUM_GPU_RESULTS] = {};
   double *d_dSlackPos_ = nullptr, *d_dSlackNeg_ = nullptr;
   double *d_dSlackPosAvg_ = nullptr, *d_dSlackNegAvg_ = nullptr;
   double *d_buffer_ = nullptr, *d_buffer2_ = nullptr;  // General purpose
@@ -323,6 +324,8 @@ class PDLPSolver {
   double computeDiffNormCuBLAS(const double* d_a, const double* d_b, int n);
   void performHalpernPdhgStepGpu(bool is_major, int k_offset);
   double computeFixedPointErrorGpu();
+  void launchFixedPointErrorGpu();
+  double fixedPointErrorFromSums(const double* fpe_sums) const;
 
   // Kernel Wrappers
   void launchKernelUpdateX(double primal_step);

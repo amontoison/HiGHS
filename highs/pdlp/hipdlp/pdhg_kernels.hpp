@@ -3,6 +3,16 @@
 #if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
 #include "gpu_backend.hpp"
 
+// Layout of d_convergence_results_
+#define IDX_PRIMAL_FEAS 0
+#define IDX_DUAL_FEAS 1
+#define IDX_PRIMAL_OBJ 2
+#define IDX_DUAL_OBJ 3
+#define IDX_FPE_PRIMAL_SQ 4
+#define IDX_FPE_DUAL_SQ 5
+#define IDX_FPE_CROSS 6
+#define NUM_GPU_RESULTS 7
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -66,6 +76,17 @@ void launchKernelHalpernDualMajor_wrapper(
     const bool* d_is_equality, const double* d_step_size, int n,
     const double* d_anchor, const int* d_halpern_iteration, int k_offset,
     double reflection_coeff, gpuStream_t stream);
+
+void launchKernelFixedPointErrorDual_wrapper(double* d_delta_y,
+                                             const double* d_pdhg_dual,
+                                             const double* d_reflected_dual,
+                                             double* d_results, int n_rows,
+                                             gpuStream_t stream);
+
+void launchKernelFixedPointErrorPrimal_wrapper(
+    const double* d_pdhg_primal, const double* d_reflected_primal,
+    const double* d_at_delta_y, double* d_results, int n_cols,
+    gpuStream_t stream);
 
 void launchKernelScaleByInverse_wrapper(double* d_x_out, const double* d_x_in,
                                         const double* d_norm, int n,
