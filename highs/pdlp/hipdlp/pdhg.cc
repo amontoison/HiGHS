@@ -1067,6 +1067,8 @@ void PDLPSolver::prepareNextIteration() {
 }
 #if defined(CUPDLP_GPU) || defined(HIPDLP_GPU)
 void PDLPSolver::performHalpernPdhgStepGpu(bool is_major, int k_offset) {
+  const double rho = params_.halpern_gamma;
+
   linalgGpuATy(d_y_current_, d_aty_current_);
 
   if (is_major) {
@@ -1074,12 +1076,14 @@ void PDLPSolver::performHalpernPdhgStepGpu(bool is_major, int k_offset) {
         d_x_current_, d_pdhg_primal_, d_x_next_ /*reflected*/,
         d_aty_current_ /*dual_product*/, d_col_cost_, d_col_lower_,
         d_col_upper_, d_primal_step_size_, a_num_cols_,
-        d_dSlackPos_ /*dual_slack*/, gpu_stream_);
+        d_dSlackPos_ /*dual_slack*/, d_x_anchor_, d_halpern_iteration_,
+        k_offset, rho, gpu_stream_);
   } else {
     launchKernelHalpernPrimalMinor_wrapper(
         d_x_current_, d_x_next_ /*reflected*/, d_aty_current_ /*dual_product*/,
         d_col_cost_, d_col_lower_, d_col_upper_, d_primal_step_size_,
-        a_num_cols_, gpu_stream_);
+        a_num_cols_, d_x_anchor_, d_halpern_iteration_, k_offset, rho,
+        gpu_stream_);
   }
 
   linalgGpuAx(d_x_next_, d_ax_next_);
@@ -1088,22 +1092,14 @@ void PDLPSolver::performHalpernPdhgStepGpu(bool is_major, int k_offset) {
     launchKernelHalpernDualMajor_wrapper(
         d_y_current_, d_pdhg_dual_, d_y_next_ /*reflected*/,
         d_ax_next_ /*primal_product*/, d_row_lower_, d_is_equality_row_,
-        d_dual_step_size_, a_num_rows_, gpu_stream_);
+        d_dual_step_size_, a_num_rows_, d_y_anchor_, d_halpern_iteration_,
+        k_offset, rho, gpu_stream_);
   } else {
     launchKernelHalpernDualMinor_wrapper(
         d_y_current_, d_y_next_ /*reflected*/, d_ax_next_ /*primal_product*/,
         d_row_lower_, d_is_equality_row_, d_dual_step_size_, a_num_rows_,
-        gpu_stream_);
+        d_y_anchor_, d_halpern_iteration_, k_offset, rho, gpu_stream_);
   }
-
-  double rho = params_.halpern_gamma;
-
-  launchKernelHalpernBlend_wrapper(d_x_current_, d_x_next_ /*reflected*/,
-                                   d_x_anchor_, d_halpern_iteration_, k_offset,
-                                   rho, a_num_cols_, gpu_stream_);
-  launchKernelHalpernBlend_wrapper(d_y_current_, d_y_next_ /*reflected*/,
-                                   d_y_anchor_, d_halpern_iteration_, k_offset,
-                                   rho, a_num_rows_, gpu_stream_);
 }
 #endif
 

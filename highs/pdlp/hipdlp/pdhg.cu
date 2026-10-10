@@ -257,29 +257,53 @@ __global__ void kernelCheckDual(
 // HALPERN-MODE
 // ============================================================================
 
+__device__ __forceinline__ double halpernWeight(const int* halpern_iteration,
+                                                int k_offset) {
+  const int current_k = (*halpern_iteration) + k_offset;
+  return static_cast<double>(current_k) / (current_k + 1.0);
+}
+
+// current = w * (rho*reflected + (1-rho)*current) + (1-w)*anchor
+__device__ __forceinline__ double halpernBlend(double current,
+                                               double reflected, double anchor,
+                                               double weight,
+                                               double reflection_coeff) {
+  const double blended =
+      fma_rn(reflection_coeff, reflected,
+             fma_rn(1.0 - reflection_coeff, current, 0.0));
+  return fma_rn(weight, blended, fma_rn(1.0 - weight, anchor, 0.0));
+}
+
 // Minor: every iteration. Only writes reflected_primal.
 __global__ void kernelHalpernPrimalMinor(
-    const double* __restrict__ current_primal,
+    double* __restrict__ current_primal,
     double* __restrict__ reflected_primal,
     const double* __restrict__ dual_product,     // A^T * current_dual
     const double* __restrict__ objective,
         const double* __restrict__ var_lb,
         const double* __restrict__ var_ub,
-        const double* __restrict__ step_size_ptr, int n)
+        const double* __restrict__ step_size_ptr, int n,
+    const double* __restrict__ anchor,
+    const int* __restrict__ halpern_iteration, int k_offset,
+    double reflection_coeff)
 {
         const double step_size = *step_size_ptr;
+        const double weight = halpernWeight(halpern_iteration, k_offset);
     GPU_GRID_STRIDE_LOOP(i, n) {
         double temp = fma_rn(-step_size, objective[i] - dual_product[i],
                              current_primal[i]);
         double temp_proj = fmax(var_lb[i], fmin(temp, var_ub[i]));
-        reflected_primal[i] = fma_rn(2.0, temp_proj, -current_primal[i]);
+        const double reflected = fma_rn(2.0, temp_proj, -current_primal[i]);
+        reflected_primal[i] = reflected;
+        current_primal[i] = halpernBlend(current_primal[i], reflected,
+                                         anchor[i], weight, reflection_coeff);
     }
 }
 
 // Major: convergence-check iterations.
 // Additionally writes pdhg_primal and dual_slack.
 __global__ void kernelHalpernPrimalMajor(
-    const double* __restrict__ current_primal,
+    double* __restrict__ current_primal,
     double* __restrict__ pdhg_primal,
     double* __restrict__ reflected_primal,
     const double* __restrict__ dual_product,
@@ -287,9 +311,13 @@ __global__ void kernelHalpernPrimalMajor(
         const double* __restrict__ var_lb,
         const double* __restrict__ var_ub,
         const double* __restrict__ step_size_ptr, int n,
-    double* __restrict__ dual_slack)
+    double* __restrict__ dual_slack,
+    const double* __restrict__ anchor,
+    const int* __restrict__ halpern_iteration, int k_offset,
+    double reflection_coeff)
 {
         const double step_size = *step_size_ptr;
+        const double weight = halpernWeight(halpern_iteration, k_offset);
         const double inv_step_size = 1.0 / step_size;
     GPU_GRID_STRIDE_LOOP(i, n) {
         double temp = fma_rn(-step_size, objective[i] - dual_product[i],
@@ -297,67 +325,62 @@ __global__ void kernelHalpernPrimalMajor(
         double temp_proj = fmax(var_lb[i], fmin(temp, var_ub[i]));
         pdhg_primal[i] = temp_proj;
         dual_slack[i] = (temp_proj - temp) * inv_step_size;
-        reflected_primal[i] = fma_rn(2.0, temp_proj, -current_primal[i]);
+        const double reflected = fma_rn(2.0, temp_proj, -current_primal[i]);
+        reflected_primal[i] = reflected;
+        current_primal[i] = halpernBlend(current_primal[i], reflected,
+                                         anchor[i], weight, reflection_coeff);
     }
 }
 
 __global__ void kernelHalpernDualMinor(
-    const double* __restrict__ current_dual,
+    double* __restrict__ current_dual,
     double* __restrict__ reflected_dual,
     const double* __restrict__ primal_product,   // A * reflected_primal
     const double* __restrict__ rhs,              // row_lower (b)
     const bool* __restrict__ is_equality,
-        const double* __restrict__ step_size_ptr, int n)
+        const double* __restrict__ step_size_ptr, int n,
+    const double* __restrict__ anchor,
+    const int* __restrict__ halpern_iteration, int k_offset,
+    double reflection_coeff)
 {
         const double step_size = *step_size_ptr;
+        const double weight = halpernWeight(halpern_iteration, k_offset);
     GPU_GRID_STRIDE_LOOP(i, n) {
         double dual_update = fma_rn(step_size, rhs[i] - primal_product[i],
                                     current_dual[i]);
         double pdhg_dual_i = is_equality[i] ? dual_update
                                              : fmax(0.0, dual_update);
-        reflected_dual[i] = fma_rn(2.0, pdhg_dual_i, -current_dual[i]);
+        const double reflected = fma_rn(2.0, pdhg_dual_i, -current_dual[i]);
+        reflected_dual[i] = reflected;
+        current_dual[i] = halpernBlend(current_dual[i], reflected,
+                                       anchor[i], weight, reflection_coeff);
     }
 }
 
 __global__ void kernelHalpernDualMajor(
-    const double* __restrict__ current_dual,
+    double* __restrict__ current_dual,
     double* __restrict__ pdhg_dual,
     double* __restrict__ reflected_dual,
     const double* __restrict__ primal_product,
     const double* __restrict__ rhs,
     const bool* __restrict__ is_equality,
-        const double* __restrict__ step_size_ptr, int n)
+        const double* __restrict__ step_size_ptr, int n,
+    const double* __restrict__ anchor,
+    const int* __restrict__ halpern_iteration, int k_offset,
+    double reflection_coeff)
 {
         const double step_size = *step_size_ptr;
+        const double weight = halpernWeight(halpern_iteration, k_offset);
     GPU_GRID_STRIDE_LOOP(i, n) {
         double dual_update = fma_rn(step_size, rhs[i] - primal_product[i],
                                     current_dual[i]);
         double pdhg_dual_i = is_equality[i] ? dual_update
                                              : fmax(0.0, dual_update);
         pdhg_dual[i] = pdhg_dual_i;
-        reflected_dual[i] = fma_rn(2.0, pdhg_dual_i, -current_dual[i]);
-    }
-}
-
-// current = w * (ρ*reflected + (1-ρ)*current) + (1-w)*initial
-__global__ void kernelHalpernBlend(
-    double* __restrict__ current,
-    const double* __restrict__ reflected,
-    const double* __restrict__ initial,
-    const int* __restrict__ halpern_iteration,
-    int k_offset,
-    double reflection_coeff,   // ρ, typically 1.0
-    HighsInt n)
-{
-    const int current_k           = (*halpern_iteration) + k_offset;
-    const double weight           = static_cast<double>(current_k) / (current_k + 1.0);
-    const double one_minus_weight = 1.0 - weight;
-    const double one_minus_rho    = 1.0 - reflection_coeff;
-    GPU_GRID_STRIDE_LOOP(i, n) {
-        double blended = fma_rn(reflection_coeff, reflected[i],
-                                fma_rn(one_minus_rho, current[i], 0.0));
-        current[i]     = fma_rn(weight, blended,
-                                fma_rn(one_minus_weight, initial[i], 0.0));
+        const double reflected = fma_rn(2.0, pdhg_dual_i, -current_dual[i]);
+        reflected_dual[i] = reflected;
+        current_dual[i] = halpernBlend(current_dual[i], reflected,
+                                       anchor[i], weight, reflection_coeff);
     }
 }
 
@@ -461,73 +484,72 @@ void launchCheckConvergenceKernels_wrapper(
 }
 
 void launchKernelHalpernPrimalMinor_wrapper(
-    const double* d_current_primal, double* d_reflected_primal,
+    double* d_current_primal, double* d_reflected_primal,
     const double* d_dual_product, const double* d_objective,
     const double* d_var_lb, const double* d_var_ub,
-    const double* d_step_size, int n, gpuStream_t stream)
+    const double* d_step_size, int n,
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream)
 {
     const int block_size = 256;
     dim3 config = GetLaunchConfig(n, block_size);
     kernelHalpernPrimalMinor<<<config.x, block_size, 0, stream>>>(
         d_current_primal, d_reflected_primal, d_dual_product,
-        d_objective, d_var_lb, d_var_ub, d_step_size, n);
+        d_objective, d_var_lb, d_var_ub, d_step_size, n,
+        d_anchor, d_halpern_iteration, k_offset, reflection_coeff);
     gpuGetLastError();
 }
 
 void launchKernelHalpernPrimalMajor_wrapper(
-    const double* d_current_primal, double* d_pdhg_primal,
+    double* d_current_primal, double* d_pdhg_primal,
     double* d_reflected_primal, const double* d_dual_product,
     const double* d_objective, const double* d_var_lb,
     const double* d_var_ub, const double* d_step_size, int n,
-    double* d_dual_slack, gpuStream_t stream)
+    double* d_dual_slack,
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream)
 {
     const int block_size = 256;
     dim3 config = GetLaunchConfig(n, block_size);
     kernelHalpernPrimalMajor<<<config.x, block_size, 0, stream>>>(
         d_current_primal, d_pdhg_primal, d_reflected_primal,
         d_dual_product, d_objective, d_var_lb, d_var_ub,
-        d_step_size, n, d_dual_slack);
+        d_step_size, n, d_dual_slack,
+        d_anchor, d_halpern_iteration, k_offset, reflection_coeff);
     gpuGetLastError();
 }
 
 void launchKernelHalpernDualMinor_wrapper(
-    const double* d_current_dual, double* d_reflected_dual,
+    double* d_current_dual, double* d_reflected_dual,
     const double* d_primal_product, const double* d_rhs,
     const bool* d_is_equality, const double* d_step_size, int n,
-    gpuStream_t stream)
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream)
 {
     const int block_size = 256;
     dim3 config = GetLaunchConfig(n, block_size);
     kernelHalpernDualMinor<<<config.x, block_size, 0, stream>>>(
         d_current_dual, d_reflected_dual, d_primal_product,
-        d_rhs, d_is_equality, d_step_size, n);
+        d_rhs, d_is_equality, d_step_size, n,
+        d_anchor, d_halpern_iteration, k_offset, reflection_coeff);
     gpuGetLastError();
 }
 
 void launchKernelHalpernDualMajor_wrapper(
-    const double* d_current_dual, double* d_pdhg_dual,
+    double* d_current_dual, double* d_pdhg_dual,
     double* d_reflected_dual, const double* d_primal_product,
     const double* d_rhs, const bool* d_is_equality,
-    const double* d_step_size, int n, gpuStream_t stream)
+    const double* d_step_size, int n,
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream)
 {
     const int block_size = 256;
     dim3 config = GetLaunchConfig(n, block_size);
     kernelHalpernDualMajor<<<config.x, block_size, 0, stream>>>(
         d_current_dual, d_pdhg_dual, d_reflected_dual,
-        d_primal_product, d_rhs, d_is_equality, d_step_size, n);
+        d_primal_product, d_rhs, d_is_equality, d_step_size, n,
+        d_anchor, d_halpern_iteration, k_offset, reflection_coeff);
     gpuGetLastError();
 }
 
-void launchKernelHalpernBlend_wrapper(
-    double* d_current, const double* d_reflected,
-    const double* d_initial, const int* d_halpern_iteration, int k_offset,
-    double reflection_coeff, int n, gpuStream_t stream)
-{
-    const int block_size = 256;
-    dim3 config = GetLaunchConfig(n, block_size);
-    kernelHalpernBlend<<<config.x, block_size, 0, stream>>>(
-        d_current, d_reflected, d_initial,
-        d_halpern_iteration, k_offset, reflection_coeff, n);
-    gpuGetLastError();
-}
 } // extern "C"

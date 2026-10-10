@@ -38,37 +38,34 @@ void launchCheckConvergenceKernels_wrapper(
     gpuStream_t stream);
 
 void launchKernelHalpernPrimalMinor_wrapper(
-    const double* d_current_primal, double* d_reflected_primal,
+    double* d_current_primal, double* d_reflected_primal,
     const double* d_dual_product, const double* d_objective,
     const double* d_var_lb, const double* d_var_ub, const double* d_step_size,
-    int n, gpuStream_t stream);
+    int n,
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream);
 
 void launchKernelHalpernPrimalMajor_wrapper(
-    const double* d_current_primal, double* d_pdhg_primal,
+    double* d_current_primal, double* d_pdhg_primal,
     double* d_reflected_primal, const double* d_dual_product,
     const double* d_objective, const double* d_var_lb, const double* d_var_ub,
-    const double* d_step_size, int n, double* d_dual_slack, gpuStream_t stream);
+    const double* d_step_size, int n, double* d_dual_slack,
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream);
 
-void launchKernelHalpernDualMinor_wrapper(const double* d_current_dual,
-                                          double* d_reflected_dual,
-                                          const double* d_primal_product,
-                                          const double* d_rhs,
-                                          const bool* d_is_equality,
-                                          const double* d_step_size, int n,
-                                          gpuStream_t stream);
-
-void launchKernelHalpernDualMajor_wrapper(
-    const double* d_current_dual, double* d_pdhg_dual, double* d_reflected_dual,
+void launchKernelHalpernDualMinor_wrapper(
+    double* d_current_dual, double* d_reflected_dual,
     const double* d_primal_product, const double* d_rhs,
     const bool* d_is_equality, const double* d_step_size, int n,
-    gpuStream_t stream);
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream);
 
-void launchKernelHalpernBlend_wrapper(double* d_current,
-                                      const double* d_reflected,
-                                      const double* d_initial,
-                                      const int* d_halpern_iteration,
-                                      int k_offset, double reflection_coeff,
-                                      int n, gpuStream_t stream);
+void launchKernelHalpernDualMajor_wrapper(
+    double* d_current_dual, double* d_pdhg_dual, double* d_reflected_dual,
+    const double* d_primal_product, const double* d_rhs,
+    const bool* d_is_equality, const double* d_step_size, int n,
+    const double* d_anchor, const int* d_halpern_iteration, int k_offset,
+    double reflection_coeff, gpuStream_t stream);
 
 #ifdef __cplusplus
 }
